@@ -433,13 +433,25 @@ let zxingReader = null;
 document.getElementById("scanBtn").onclick = startScanner;
 document.getElementById("scannerClose").onclick = stopScanner;
 
+let torchOn = false;
+document.getElementById("scannerTorch").onclick = async () => {
+  const track = scannerVideo.srcObject && scannerVideo.srcObject.getVideoTracks()[0];
+  if (!track) return;
+  torchOn = !torchOn;
+  try {
+    await track.applyConstraints({ advanced: [{ torch: torchOn }] });
+  } catch (e) {
+    torchOn = !torchOn;
+  }
+};
+
 async function startScanner() {
   if (typeof ZXingBrowser === "undefined" && typeof ZXing === "undefined") {
     showToast("Libreria di scansione non disponibile");
     return;
   }
   scannerView.style.display = "flex";
-  scannerStatus.textContent = "Cerco il codice…";
+  scannerStatus.textContent = "Tieni il codice a circa 10-15 cm, ben illuminato";
   try {
     const ReaderCtor = (window.ZXingBrowser && window.ZXingBrowser.BrowserMultiFormatReader) || window.ZXing.BrowserMultiFormatReader;
     zxingReader = new ReaderCtor();
@@ -452,7 +464,14 @@ async function startScanner() {
     } catch (e) { /* ignore */ }
 
     zxingReader.decodeFromConstraints(
-      { video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: "environment" } },
+      {
+        video: {
+          ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: "environment" }),
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          advanced: [{ focusMode: "continuous" }],
+        },
+      },
       scannerVideo,
       (result, err, controls) => {
         state.scannerControls = controls;
@@ -461,6 +480,24 @@ async function startScanner() {
         }
       }
     );
+
+    // Try to keep continuous autofocus active on the live track (Chrome Android honors this on many devices)
+    setTimeout(() => {
+      const track = scannerVideo.srcObject && scannerVideo.srcObject.getVideoTracks()[0];
+      if (track && track.getCapabilities) {
+        const caps = track.getCapabilities();
+        const constraints = {};
+        if (caps.focusMode && caps.focusMode.includes("continuous")) {
+          constraints.focusMode = "continuous";
+        }
+        if (Object.keys(constraints).length) {
+          track.applyConstraints({ advanced: [constraints] }).catch(() => {});
+        }
+        if (caps.torch) {
+          document.getElementById("scannerTorch").style.display = "flex";
+        }
+      }
+    }, 400);
   } catch (e) {
     console.error(e);
     showToast("Impossibile accedere alla fotocamera");
@@ -470,6 +507,8 @@ async function startScanner() {
 
 function stopScanner() {
   scannerView.style.display = "none";
+  torchOn = false;
+  document.getElementById("scannerTorch").style.display = "none";
   if (state.scannerControls) {
     try { state.scannerControls.stop(); } catch (e) {}
     state.scannerControls = null;
