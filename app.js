@@ -446,58 +446,51 @@ document.getElementById("scannerTorch").onclick = async () => {
 };
 
 async function startScanner() {
-  if (typeof ZXingBrowser === "undefined" && typeof ZXing === "undefined") {
+  if (typeof ZXing === "undefined") {
     showToast("Libreria di scansione non disponibile");
     return;
   }
   scannerView.style.display = "flex";
   scannerStatus.textContent = "Tieni il codice a circa 10-15 cm, ben illuminato";
   try {
-    const ReaderCtor = (window.ZXingBrowser && window.ZXingBrowser.BrowserMultiFormatReader) || window.ZXing.BrowserMultiFormatReader;
-    zxingReader = new ReaderCtor();
+    const { DecodeHintType, BarcodeFormat, BrowserMultiFormatReader } = window.ZXing;
+
+    const hints = new Map();
+    hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+      BarcodeFormat.EAN_13,
+      BarcodeFormat.EAN_8,
+      BarcodeFormat.UPC_A,
+      BarcodeFormat.UPC_E,
+      BarcodeFormat.CODE_128,
+    ]);
+    hints.set(DecodeHintType.TRY_HARDER, true);
+
+    zxingReader = new BrowserMultiFormatReader(hints, 150);
+
     let deviceId = undefined;
     try {
       const inputs = await navigator.mediaDevices.enumerateDevices();
       const cams = inputs.filter(d => d.kind === "videoinput");
       const back = cams.find(d => /back|rear|environment/i.test(d.label));
       deviceId = back ? back.deviceId : (cams[cams.length - 1] && cams[cams.length - 1].deviceId);
-    } catch (e) { /* ignore */ }
+    } catch (e) { /* ignore, fall back to facingMode */ }
 
-    zxingReader.decodeFromConstraints(
+    // Once the stream is actually flowing, try to enable continuous autofocus and reveal the torch button if supported.
+    scannerVideo.addEventListener("loadedmetadata", enableCameraExtras, { once: true });
+
+    await zxingReader.decodeFromConstraints(
       {
         video: {
           ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: "environment" }),
           width: { ideal: 1920 },
           height: { ideal: 1080 },
-          advanced: [{ focusMode: "continuous" }],
         },
       },
       scannerVideo,
-      (result, err, controls) => {
-        state.scannerControls = controls;
-        if (result) {
-          handleScanResult(result.getText());
-        }
+      (result, err) => {
+        if (result) handleScanResult(result.getText());
       }
     );
-
-    // Try to keep continuous autofocus active on the live track (Chrome Android honors this on many devices)
-    setTimeout(() => {
-      const track = scannerVideo.srcObject && scannerVideo.srcObject.getVideoTracks()[0];
-      if (track && track.getCapabilities) {
-        const caps = track.getCapabilities();
-        const constraints = {};
-        if (caps.focusMode && caps.focusMode.includes("continuous")) {
-          constraints.focusMode = "continuous";
-        }
-        if (Object.keys(constraints).length) {
-          track.applyConstraints({ advanced: [constraints] }).catch(() => {});
-        }
-        if (caps.torch) {
-          document.getElementById("scannerTorch").style.display = "flex";
-        }
-      }
-    }, 400);
   } catch (e) {
     console.error(e);
     showToast("Impossibile accedere alla fotocamera");
@@ -505,14 +498,25 @@ async function startScanner() {
   }
 }
 
+function enableCameraExtras() {
+  const track = scannerVideo.srcObject && scannerVideo.srcObject.getVideoTracks()[0];
+  if (!track || !track.getCapabilities) return;
+  const caps = track.getCapabilities();
+  const advanced = {};
+  if (caps.focusMode && caps.focusMode.includes("continuous")) advanced.focusMode = "continuous";
+  if (Object.keys(advanced).length) {
+    track.applyConstraints({ advanced: [advanced] }).catch(() => {});
+  }
+  if (caps.torch) {
+    document.getElementById("scannerTorch").style.display = "flex";
+  }
+}
+
 function stopScanner() {
   scannerView.style.display = "none";
   torchOn = false;
   document.getElementById("scannerTorch").style.display = "none";
-  if (state.scannerControls) {
-    try { state.scannerControls.stop(); } catch (e) {}
-    state.scannerControls = null;
-  }
+  scannerVideo.removeEventListener("loadedmetadata", enableCameraExtras);
   if (zxingReader && zxingReader.reset) {
     try { zxingReader.reset(); } catch (e) {}
   }
