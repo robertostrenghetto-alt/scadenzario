@@ -477,7 +477,37 @@ async function startScanner() {
     } catch (e) { /* ignore, fall back to facingMode */ }
 
     // Once the stream is actually flowing, try to enable continuous autofocus and reveal the torch button if supported.
-    scannerVideo.addEventListener("loadedmetadata", enableCameraExtras, { once: true });
+    // Tocca lo schermo per forzare il focus
+scannerVideo.addEventListener("click", async () => {
+  const track = scannerVideo.srcObject && scannerVideo.srcObject.getVideoTracks()[0];
+  if (!track || !track.getCapabilities) return;
+  
+  const caps = track.getCapabilities();
+  
+  // Prova a forzare il focus manuale al minimo (più vicino)
+  if (caps.focusMode && caps.focusMode.includes("manual") && caps.focusDistance) {
+    try {
+      await track.applyConstraints({ 
+        advanced: [{ 
+          focusMode: "manual", 
+          focusDistance: caps.focusDistance.min 
+        }] 
+      });
+      console.log("Manual focus applied");
+      
+      // Dopo 1 secondo, torna a continuous
+      setTimeout(() => {
+        track.applyConstraints({ 
+          advanced: [{ focusMode: "continuous" }] 
+        }).then(() => console.log("Back to continuous focus"))
+        .catch(() => {});
+      }, 1000);
+      
+    } catch (e) {
+      console.log("Manual focus failed:", e);
+    }
+  }
+});
 
     await zxingReader.decodeFromConstraints(
       {
@@ -500,12 +530,33 @@ async function startScanner() {
 function enableCameraExtras() {
   const track = scannerVideo.srcObject && scannerVideo.srcObject.getVideoTracks()[0];
   if (!track || !track.getCapabilities) return;
+  
   const caps = track.getCapabilities();
-  const advanced = {};
-  if (caps.focusMode && caps.focusMode.includes("continuous")) advanced.focusMode = "continuous";
-  if (Object.keys(advanced).length) {
-    track.applyConstraints({ advanced: [advanced] }).catch(() => {});
+  console.log("Camera capabilities:", caps); // <-- aggiunto per debug
+  
+  const constraints = {};
+  
+  // Prova autofocus continuo
+  if (caps.focusMode && caps.focusMode.includes("continuous")) {
+    constraints.focusMode = "continuous";
+    console.log("Setting continuous autofocus");
+  } else if (caps.focusMode && caps.focusMode.includes("auto")) {
+    constraints.focusMode = "auto";
+    console.log("Setting auto focus");
   }
+  
+  // Prova a impostare distanza focus vicina (macro)
+  if (caps.focusDistance) {
+    constraints.focusDistance = caps.focusDistance.min || 0;
+    console.log("Setting focus distance to:", constraints.focusDistance);
+  }
+  
+  if (Object.keys(constraints).length) {
+    track.applyConstraints({ advanced: [constraints] })
+      .then(() => console.log("Focus settings applied successfully"))
+      .catch(e => console.log("Focus settings failed:", e));
+  }
+  
   if (caps.torch) {
     document.getElementById("scannerTorch").style.display = "flex";
   }
