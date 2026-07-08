@@ -120,21 +120,33 @@
     </div>
   </div>
 
-  <!-- Scanner -->
-  <div class="scanner-view" id="scannerView" style="display:none;">
-    <div class="scanner-top">
-      <button class="scanner-close" id="scannerClose">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-      </button>
-      <div class="label">Inquadra il codice a barre</div>
-      <button class="scanner-close" id="scannerTorch" style="display:none;">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M9 18h6M10 22h4M15 2H9l-1 8h2l-1 8 6-10h-3l2-6z"/></svg>
-      </button>
-    </div>
-    <video id="scannerVideo" autoplay muted playsinline></video>
-    <div class="scanner-frame"></div>
-    <div class="scanner-status" id="scannerStatus">Cerco il codice…</div>
+ <!-- Scanner con foto -->
+<div class="scanner-view" id="scannerView" style="display:none;">
+  <div class="scanner-top">
+    <button class="scanner-close" id="scannerClose">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+    <div class="label">Scatta una foto del codice a barre</div>
   </div>
+  
+  <!-- Video per la preview -->
+  <video id="scannerVideo" autoplay muted playsinline style="display:none;"></video>
+  
+  <!-- Canvas per catturare la foto -->
+  <canvas id="scannerCanvas" style="display:none;"></canvas>
+  
+  <!-- Preview della foto scattata -->
+  <img id="scannerPreview" style="display:none; width:100%; height:100%; object-fit:contain; background:black;">
+  
+  <div class="scanner-frame"></div>
+  
+  <div class="scanner-status" id="scannerStatus">Avvicina il codice e scatta</div>
+  
+  <!-- Pulsante scatta -->
+  <button class="scanner-shutter" id="scannerShutter">
+    <div class="shutter-inner"></div>
+  </button>
+</div>
 
   <div class="toast" id="toast"></div>
 </div>
