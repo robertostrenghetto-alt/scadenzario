@@ -94,8 +94,8 @@ function formatDateStr(dateStr) {
 }
 function statusFromDays(days) {
   if (days === null) return "none";
-  if (days < 0) return "red";
-  if (days <= 3) return "amber";
+  if (days < 3) return "red";
+  if (days <= 9) return "amber";
   return "ok";
 }
 function statusLabel(days) {
@@ -195,7 +195,7 @@ function renderList() {
   });
 
   const sections = [
-    { key: "red", label: "Scaduti" },
+    { key: "red", label: "Da consumare subito" },
     { key: "amber", label: "In scadenza" },
     { key: "ok", label: "A posto" },
     { key: "none", label: "Senza scadenza" },
