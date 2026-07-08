@@ -306,3 +306,32 @@ button { font-family: inherit; }
   padding: 3px 9px; border-radius: 999px; margin-top: 10px;
 }
 .offline-pill.on { color: var(--amber); background: var(--amber-bg); }
+/* Pulsante scatta foto */
+.scanner-shutter {
+  position: absolute;
+  bottom: calc(40px + env(safe-area-inset-bottom, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.3);
+  border: 4px solid white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+.scanner-shutter:active {
+  background: rgba(255,255,255,0.5);
+}
+.shutter-inner {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: white;
+}
+.scanner-shutter:active .shutter-inner {
+  width: 48px;
+  height: 48px;
+}
