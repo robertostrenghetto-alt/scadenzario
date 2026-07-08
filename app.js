@@ -427,34 +427,90 @@ document.getElementById("addCatBtn").onclick = async () => {
 /* ===================== Barcode scanner ===================== */
 const scannerView = document.getElementById("scannerView");
 const scannerVideo = document.getElementById("scannerVideo");
+const scannerCanvas = document.getElementById("scannerCanvas");
+const scannerPreview = document.getElementById("scannerPreview");
 const scannerStatus = document.getElementById("scannerStatus");
+const scannerShutter = document.getElementById("scannerShutter");
 let zxingReader = null;
+let scannerStream = null;
 
 document.getElementById("scanBtn").onclick = startScanner;
 document.getElementById("scannerClose").onclick = stopScanner;
-
-let torchOn = false;
-document.getElementById("scannerTorch").onclick = async () => {
-  const track = scannerVideo.srcObject && scannerVideo.srcObject.getVideoTracks()[0];
-  if (!track) return;
-  torchOn = !torchOn;
-  try {
-    await track.applyConstraints({ advanced: [{ torch: torchOn }] });
-  } catch (e) {
-    torchOn = !torchOn;
-  }
-};
+scannerShutter.onclick = takePhoto;
 
 async function startScanner() {
   if (typeof ZXing === "undefined") {
     showToast("Libreria di scansione non disponibile");
     return;
   }
-  scannerView.style.display = "flex";
-  scannerStatus.textContent = "Tocca lo schermo per rimettere a fuoco";
-  try {
-    const { DecodeHintType, BarcodeFormat, BrowserMultiFormatReader } = window.ZXing;
 
+  scannerView.style.display = "flex";
+  scannerStatus.textContent = "Avvicina il codice e scatta una foto";
+  scannerPreview.style.display = "none";
+  scannerVideo.style.display = "block";
+  scannerShutter.style.display = "flex";
+
+  try {
+    // Avvia la fotocamera
+    const constraints = {
+      video: {
+        facingMode: "environment",
+        width: { ideal: 1920 },
+        height: { ideal: 1080 }
+      }
+    };
+
+    scannerStream = await navigator.mediaDevices.getUserMedia(constraints);
+    scannerVideo.srcObject = scannerStream;
+    
+    // Aspetta che il video sia pronto
+    await new Promise(resolve => {
+      scannerVideo.onloadedmetadata = () => {
+        scannerVideo.play();
+        resolve();
+      };
+    });
+
+  } catch (e) {
+    console.error(e);
+    showToast("Impossibile accedere alla fotocamera");
+    stopScanner();
+  }
+}
+
+function takePhoto() {
+  if (!scannerVideo.videoWidth) {
+    showToast("Fotocamera non pronta, riprova");
+    return;
+  }
+
+  // Cattura la foto sul canvas
+  scannerCanvas.width = scannerVideo.videoWidth;
+  scannerCanvas.height = scannerVideo.videoHeight;
+  const ctx = scannerCanvas.getContext("2d");
+  ctx.drawImage(scannerVideo, 0, 0);
+
+  // Mostra la preview
+  scannerPreview.src = scannerCanvas.toDataURL("image/png");
+  scannerPreview.style.display = "block";
+  scannerVideo.style.display = "none";
+  scannerShutter.style.display = "none";
+  scannerStatus.textContent = "Analizzo il codice…";
+
+  // Analizza la foto con ZXing
+  analyzePhoto();
+}
+
+async function analyzePhoto() {
+  if (typeof ZXing === "undefined") {
+    showToast("Libreria non disponibile");
+    stopScanner();
+    return;
+  }
+
+  try {
+    const { BrowserMultiFormatReader, BarcodeFormat, DecodeHintType } = window.ZXing;
+    
     const hints = new Map();
     hints.set(DecodeHintType.POSSIBLE_FORMATS, [
       BarcodeFormat.EAN_13,
@@ -465,139 +521,52 @@ async function startScanner() {
     ]);
     hints.set(DecodeHintType.TRY_HARDER, true);
 
-    zxingReader = new BrowserMultiFormatReader(hints, 150);
-
-    let deviceId = undefined;
-    try {
-      const inputs = await navigator.mediaDevices.enumerateDevices();
-      const cams = inputs.filter(d => d.kind === "videoinput");
-      const macro = cams.find(d => /macro/i.test(d.label));
-      const back = cams.find(d => /back|rear|environment/i.test(d.label));
-      deviceId = (macro || back) ? (macro || back).deviceId : (cams[cams.length - 1] && cams[cams.length - 1].deviceId);
-    } catch (e) { /* ignore, fall back to facingMode */ }
-
-    // Once the stream is actually flowing, try to enable continuous autofocus and reveal the torch button if supported.
-    // Tocca lo schermo per forzare il focus
-scannerVideo.addEventListener("click", async () => {
-  const track = scannerVideo.srcObject && scannerVideo.srcObject.getVideoTracks()[0];
-  if (!track || !track.getCapabilities) return;
-  
-  const caps = track.getCapabilities();
-  
-  // Prova a forzare il focus manuale al minimo (più vicino)
-  if (caps.focusMode && caps.focusMode.includes("manual") && caps.focusDistance) {
-    try {
-      await track.applyConstraints({ 
-        advanced: [{ 
-          focusMode: "manual", 
-          focusDistance: caps.focusDistance.min 
-        }] 
-      });
-      console.log("Manual focus applied");
-      
-      // Dopo 1 secondo, torna a continuous
+    const reader = new BrowserMultiFormatReader(hints);
+    
+    // Analizza l'immagine dal canvas
+    const result = await reader.decodeFromImageUrl(scannerCanvas.toDataURL("image/png"));
+    
+    if (result) {
+      scannerStatus.textContent = "Codice trovato: " + result.getText();
       setTimeout(() => {
-        track.applyConstraints({ 
-          advanced: [{ focusMode: "continuous" }] 
-        }).then(() => console.log("Back to continuous focus"))
-        .catch(() => {});
-      }, 1000);
-      
-    } catch (e) {
-      console.log("Manual focus failed:", e);
+        handleScanResult(result.getText());
+      }, 500);
     }
-  }
-});
 
-    await zxingReader.decodeFromConstraints(
-      {
-        video: {
-          ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: "environment" }),
-        },
-      },
-      scannerVideo,
-      (result, err) => {
-        if (result) handleScanResult(result.getText());
-      }
-    );
   } catch (e) {
-    console.error(e);
-    showToast("Impossibile accedere alla fotocamera");
-    stopScanner();
+    console.log("Codice non trovato nella foto:", e);
+    scannerStatus.textContent = "Codice non trovato. Tocca per riprovare.";
+    
+    // Permetti di riprovare
+    scannerPreview.style.display = "none";
+    scannerVideo.style.display = "block";
+    scannerShutter.style.display = "flex";
   }
 }
 
-function enableCameraExtras() {
-  const track = scannerVideo.srcObject && scannerVideo.srcObject.getVideoTracks()[0];
-  if (!track || !track.getCapabilities) return;
-  
-  const caps = track.getCapabilities();
-  console.log("Camera capabilities:", caps); // <-- aggiunto per debug
-  
-  const constraints = {};
-  
-  // Prova autofocus continuo
-  if (caps.focusMode && caps.focusMode.includes("continuous")) {
-    constraints.focusMode = "continuous";
-    console.log("Setting continuous autofocus");
-  } else if (caps.focusMode && caps.focusMode.includes("auto")) {
-    constraints.focusMode = "auto";
-    console.log("Setting auto focus");
-  }
-  
-  // Prova a impostare distanza focus vicina (macro)
-  if (caps.focusDistance) {
-    constraints.focusDistance = caps.focusDistance.min || 0;
-    console.log("Setting focus distance to:", constraints.focusDistance);
-  }
-  
-  if (Object.keys(constraints).length) {
-    track.applyConstraints({ advanced: [constraints] })
-      .then(() => console.log("Focus settings applied successfully"))
-      .catch(e => console.log("Focus settings failed:", e));
-  }
-  
-  if (caps.torch) {
-    document.getElementById("scannerTorch").style.display = "flex";
-  }
-}
-
-// Tapping the video nudges the camera to re-attempt focus — helpful when continuous
-// autofocus gets "stuck" on some Android devices.
-scannerVideo.addEventListener("click", () => {
-  const track = scannerVideo.srcObject && scannerVideo.srcObject.getVideoTracks()[0];
-  if (!track || !track.getCapabilities) return;
-  const caps = track.getCapabilities();
-  if (!caps.focusMode) return;
-  if (caps.focusMode.includes("single-shot")) {
-    track.applyConstraints({ advanced: [{ focusMode: "single-shot" }] })
-      .then(() => {
-        setTimeout(() => {
-          if (caps.focusMode.includes("continuous")) {
-            track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
-          }
-        }, 600);
-      })
-      .catch(() => {});
-  }
-});
+// Tocca la preview per riprovare
+scannerPreview.onclick = () => {
+  scannerPreview.style.display = "none";
+  scannerVideo.style.display = "block";
+  scannerShutter.style.display = "flex";
+  scannerStatus.textContent = "Avvicina il codice e scatta una foto";
+};
 
 function stopScanner() {
   scannerView.style.display = "none";
-  torchOn = false;
-  document.getElementById("scannerTorch").style.display = "none";
-  scannerVideo.removeEventListener("loadedmetadata", enableCameraExtras);
-  if (zxingReader && zxingReader.reset) {
-    try { zxingReader.reset(); } catch (e) {}
+  
+  if (scannerStream) {
+    scannerStream.getTracks().forEach(t => t.stop());
+    scannerStream = null;
   }
-  if (scannerVideo.srcObject) {
-    scannerVideo.srcObject.getTracks().forEach(t => t.stop());
-    scannerVideo.srcObject = null;
-  }
+  
+  scannerVideo.srcObject = null;
+  scannerPreview.src = "";
+  scannerPreview.style.display = "none";
+  scannerVideo.style.display = "block";
 }
 
 async function handleScanResult(code) {
-  scannerStatus.textContent = "Trovato: " + code;
   stopScanner();
   itemBarcode.value = code;
   if (!itemBackdrop.classList.contains("open")) {
@@ -605,40 +574,7 @@ async function handleScanResult(code) {
     itemBarcode.value = code;
   }
   await lookupProduct(code);
-}
-
-async function lookupProduct(code) {
-  if (!navigator.onLine) {
-    productHint.style.display = "flex";
-    productHint.className = "product-hint warn";
-    productHint.textContent = "Sei offline: inserisci i dati del prodotto manualmente.";
-    return;
-  }
-  productHint.style.display = "flex";
-  productHint.className = "product-hint";
-  productHint.textContent = "Cerco il prodotto…";
-  try {
-    const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`);
-    const data = await res.json();
-    if (data && data.status === 1 && data.product) {
-      const p = data.product;
-      const name = p.product_name_it || p.product_name || "";
-      const brand = p.brands || "";
-      if (name) itemName.value = brand ? `${name}` : name;
-      productHint.textContent = `Trovato: ${name || "prodotto"}${brand ? " · " + brand : ""}`;
-      productHint.className = "product-hint";
-    } else {
-      productHint.textContent = "Prodotto non trovato: inserisci nome e categoria manualmente.";
-      productHint.className = "product-hint warn";
-    }
-  } catch (e) {
-    productHint.textContent = "Ricerca non riuscita: inserisci i dati manualmente.";
-    productHint.className = "product-hint warn";
-  }
-}
-
-/* ===================== Toast ===================== */
-let toastTimer = null;
+}let toastTimer = null;
 function showToast(msg) {
   const el = document.getElementById("toast");
   el.textContent = msg;
