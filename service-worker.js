@@ -1,4 +1,4 @@
-const CACHE_NAME = "scadenzario-v1";
+const CACHE_NAME = "scadenzario-v2";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -16,6 +16,10 @@ const APP_SHELL = [
   "./assets/icons/icon-512.png",
   "./assets/icons/icon-maskable-512.png",
 ];
+
+// Files that change often: always try the network first, so updates show up
+// immediately when online, falling back to cache only when offline.
+const NETWORK_FIRST = ["./", "./index.html", "./style.css", "./app.js", "./manifest.json"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -39,10 +43,11 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached;
-      return fetch(event.request)
+  const isNetworkFirst = NETWORK_FIRST.some((p) => url.pathname.endsWith(p.replace("./", "/")) || (p === "./" && url.pathname === "/"));
+
+  if (isNetworkFirst) {
+    event.respondWith(
+      fetch(event.request)
         .then((response) => {
           if (response && response.status === 200) {
             const clone = response.clone();
@@ -50,11 +55,22 @@ self.addEventListener("fetch", (event) => {
           }
           return response;
         })
-        .catch(() => {
-          if (event.request.mode === "navigate") {
-            return caches.match("./index.html");
-          }
-        });
+        .catch(() => caches.match(event.request).then((cached) => cached || caches.match("./index.html")))
+    );
+    return;
+  }
+
+  // Static assets (fonts, icons, barcode library): cache-first, they never change.
+  event.respondWith(
+    caches.match(event.request).then((cached) => {
+      if (cached) return cached;
+      return fetch(event.request).then((response) => {
+        if (response && response.status === 200) {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+        }
+        return response;
+      });
     })
   );
 });
