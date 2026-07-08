@@ -451,7 +451,7 @@ async function startScanner() {
     return;
   }
   scannerView.style.display = "flex";
-  scannerStatus.textContent = "Tieni il codice a circa 10-15 cm, ben illuminato";
+  scannerStatus.textContent = "Tocca lo schermo per rimettere a fuoco";
   try {
     const { DecodeHintType, BarcodeFormat, BrowserMultiFormatReader } = window.ZXing;
 
@@ -471,8 +471,9 @@ async function startScanner() {
     try {
       const inputs = await navigator.mediaDevices.enumerateDevices();
       const cams = inputs.filter(d => d.kind === "videoinput");
+      const macro = cams.find(d => /macro/i.test(d.label));
       const back = cams.find(d => /back|rear|environment/i.test(d.label));
-      deviceId = back ? back.deviceId : (cams[cams.length - 1] && cams[cams.length - 1].deviceId);
+      deviceId = (macro || back) ? (macro || back).deviceId : (cams[cams.length - 1] && cams[cams.length - 1].deviceId);
     } catch (e) { /* ignore, fall back to facingMode */ }
 
     // Once the stream is actually flowing, try to enable continuous autofocus and reveal the torch button if supported.
@@ -482,8 +483,6 @@ async function startScanner() {
       {
         video: {
           ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: "environment" }),
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
         },
       },
       scannerVideo,
@@ -511,6 +510,26 @@ function enableCameraExtras() {
     document.getElementById("scannerTorch").style.display = "flex";
   }
 }
+
+// Tapping the video nudges the camera to re-attempt focus — helpful when continuous
+// autofocus gets "stuck" on some Android devices.
+scannerVideo.addEventListener("click", () => {
+  const track = scannerVideo.srcObject && scannerVideo.srcObject.getVideoTracks()[0];
+  if (!track || !track.getCapabilities) return;
+  const caps = track.getCapabilities();
+  if (!caps.focusMode) return;
+  if (caps.focusMode.includes("single-shot")) {
+    track.applyConstraints({ advanced: [{ focusMode: "single-shot" }] })
+      .then(() => {
+        setTimeout(() => {
+          if (caps.focusMode.includes("continuous")) {
+            track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
+          }
+        }, 600);
+      })
+      .catch(() => {});
+  }
+});
 
 function stopScanner() {
   scannerView.style.display = "none";
