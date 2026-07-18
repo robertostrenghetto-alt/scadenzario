@@ -1,5 +1,50 @@
 "use strict";
 
+/* ===================== Supabase sync (for Telegram alerts) ===================== */
+// Incolla qui l'URL e la chiave "anon public" del progetto ovwauqqwwsoyilsshzta
+// (Supabase → Settings → API). Finché restano ai valori di default, la sincronizzazione
+// resta disattivata e l'app funziona esattamente come prima, solo in locale.
+const SUPABASE_URL = "https://ovwauqqwwsoyilsshzta.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im92d2F1cXF3d3NveWlsc3NoenRhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM2OTk0MDQsImV4cCI6MjA4OTI3NTQwNH0.JbP-1n2pwtSI5LIV7LLAUfhpGUFG3pEsI2AFVcuuslg";
+
+let sb = null;
+if (SUPABASE_URL.startsWith("http") && SUPABASE_ANON_KEY.length > 20 && window.supabase) {
+  sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+}
+
+function toRemoteItem(item) {
+  return {
+    id: item.id,
+    name: item.name,
+    category_id: item.categoryId || null,
+    quantity: item.quantity || null,
+    date_type: item.dateType || null,
+    expiry_date: item.expiryDate || null,
+    notes: item.notes || null,
+    barcode: item.barcode || null,
+    added_at: item.addedAt || null,
+    updated_at: item.updatedAt || null,
+    notified_amber: false, // ogni modifica riarma l'allarme
+  };
+}
+
+async function syncItemRemote(item) {
+  if (!sb || !navigator.onLine) return;
+  try { await sb.from("scadenzario_items").upsert(toRemoteItem(item)); } catch (e) { /* best-effort */ }
+}
+async function syncItemDeleteRemote(id) {
+  if (!sb || !navigator.onLine) return;
+  try { await sb.from("scadenzario_items").delete().eq("id", id); } catch (e) { /* best-effort */ }
+}
+async function syncCategoryRemote(cat) {
+  if (!sb || !navigator.onLine) return;
+  try { await sb.from("scadenzario_categories").upsert({ id: cat.id, name: cat.name, order: cat.order }); } catch (e) { /* best-effort */ }
+}
+async function syncCategoryDeleteRemote(id) {
+  if (!sb || !navigator.onLine) return;
+  try { await sb.from("scadenzario_categories").delete().eq("id", id); } catch (e) { /* best-effort */ }
+}
+
 /* ===================== DB layer ===================== */
 const DB_NAME = "scadenzarioDB";
 const DB_VERSION = 1;
@@ -335,6 +380,7 @@ document.getElementById("saveItemBtn").onclick = async () => {
     updatedAt: Date.now(),
   };
   await put("items", obj);
+  syncItemRemote(obj);
   await loadAll();
   closeItemSheet();
   showToast(itemId.value ? "Alimento aggiornato" : "Alimento aggiunto");
@@ -343,6 +389,7 @@ document.getElementById("saveItemBtn").onclick = async () => {
 deleteItemBtn.onclick = async () => {
   if (!itemId.value) return;
   await del("items", itemId.value);
+  syncItemDeleteRemote(itemId.value);
   await loadAll();
   closeItemSheet();
   showToast("Alimento eliminato");
@@ -389,6 +436,7 @@ function renderCatList() {
       if (cat && inp.value.trim()) {
         cat.name = inp.value.trim();
         await put("categories", cat);
+        syncCategoryRemote(cat);
         await loadAll();
         renderCatList();
       }
@@ -402,10 +450,12 @@ function renderCatList() {
         return;
       }
       await del("categories", id);
+      syncCategoryDeleteRemote(id);
       const affected = state.items.filter(i => i.categoryId === id);
       for (const it of affected) {
         it.categoryId = null;
         await put("items", it);
+        syncItemRemote(it);
       }
       await loadAll();
       renderCatList();
@@ -418,7 +468,9 @@ document.getElementById("addCatBtn").onclick = async () => {
   const name = input.value.trim();
   if (!name) return;
   const maxOrder = state.categories.reduce((m, c) => Math.max(m, c.order), -1);
-  await put("categories", { id: uid(), name, order: maxOrder + 1 });
+  const newCat = { id: uid(), name, order: maxOrder + 1 };
+  await put("categories", newCat);
+  syncCategoryRemote(newCat);
   input.value = "";
   await loadAll();
   renderCatList();
@@ -427,90 +479,34 @@ document.getElementById("addCatBtn").onclick = async () => {
 /* ===================== Barcode scanner ===================== */
 const scannerView = document.getElementById("scannerView");
 const scannerVideo = document.getElementById("scannerVideo");
-const scannerCanvas = document.getElementById("scannerCanvas");
-const scannerPreview = document.getElementById("scannerPreview");
 const scannerStatus = document.getElementById("scannerStatus");
-const scannerShutter = document.getElementById("scannerShutter");
 let zxingReader = null;
-let scannerStream = null;
 
 document.getElementById("scanBtn").onclick = startScanner;
 document.getElementById("scannerClose").onclick = stopScanner;
-scannerShutter.onclick = takePhoto;
+
+let torchOn = false;
+document.getElementById("scannerTorch").onclick = async () => {
+  const track = scannerVideo.srcObject && scannerVideo.srcObject.getVideoTracks()[0];
+  if (!track) return;
+  torchOn = !torchOn;
+  try {
+    await track.applyConstraints({ advanced: [{ torch: torchOn }] });
+  } catch (e) {
+    torchOn = !torchOn;
+  }
+};
 
 async function startScanner() {
   if (typeof ZXing === "undefined") {
     showToast("Libreria di scansione non disponibile");
     return;
   }
-
   scannerView.style.display = "flex";
-  scannerStatus.textContent = "Avvicina il codice e scatta una foto";
-  scannerPreview.style.display = "none";
-  scannerVideo.style.display = "block";
-  scannerShutter.style.display = "flex";
-
+  scannerStatus.textContent = "Tocca lo schermo per rimettere a fuoco";
   try {
-    // Avvia la fotocamera
-    const constraints = {
-      video: {
-        facingMode: "environment",
-        width: { ideal: 1920 },
-        height: { ideal: 1080 }
-      }
-    };
+    const { DecodeHintType, BarcodeFormat, BrowserMultiFormatReader } = window.ZXing;
 
-    scannerStream = await navigator.mediaDevices.getUserMedia(constraints);
-    scannerVideo.srcObject = scannerStream;
-    
-    // Aspetta che il video sia pronto
-    await new Promise(resolve => {
-      scannerVideo.onloadedmetadata = () => {
-        scannerVideo.play();
-        resolve();
-      };
-    });
-
-  } catch (e) {
-    console.error(e);
-    showToast("Impossibile accedere alla fotocamera");
-    stopScanner();
-  }
-}
-
-function takePhoto() {
-  if (!scannerVideo.videoWidth) {
-    showToast("Fotocamera non pronta, riprova");
-    return;
-  }
-
-  // Cattura la foto sul canvas
-  scannerCanvas.width = scannerVideo.videoWidth;
-  scannerCanvas.height = scannerVideo.videoHeight;
-  const ctx = scannerCanvas.getContext("2d");
-  ctx.drawImage(scannerVideo, 0, 0);
-
-  // Mostra la preview
-  scannerPreview.src = scannerCanvas.toDataURL("image/png");
-  scannerPreview.style.display = "block";
-  scannerVideo.style.display = "none";
-  scannerShutter.style.display = "none";
-  scannerStatus.textContent = "Analizzo il codice…";
-
-  // Analizza la foto con ZXing
-  analyzePhoto();
-}
-
-async function analyzePhoto() {
-  if (typeof ZXing === "undefined") {
-    showToast("Libreria non disponibile");
-    stopScanner();
-    return;
-  }
-
-  try {
-    const { BrowserMultiFormatReader, BarcodeFormat, DecodeHintType } = window.ZXing;
-    
     const hints = new Map();
     hints.set(DecodeHintType.POSSIBLE_FORMATS, [
       BarcodeFormat.EAN_13,
@@ -521,52 +517,88 @@ async function analyzePhoto() {
     ]);
     hints.set(DecodeHintType.TRY_HARDER, true);
 
-    const reader = new BrowserMultiFormatReader(hints);
-    
-    // Analizza l'immagine dal canvas
-    const result = await reader.decodeFromImageUrl(scannerCanvas.toDataURL("image/png"));
-    
-    if (result) {
-      scannerStatus.textContent = "Codice trovato: " + result.getText();
-      setTimeout(() => {
-        handleScanResult(result.getText());
-      }, 500);
-    }
+    zxingReader = new BrowserMultiFormatReader(hints, 150);
 
+    let deviceId = undefined;
+    try {
+      const inputs = await navigator.mediaDevices.enumerateDevices();
+      const cams = inputs.filter(d => d.kind === "videoinput");
+      const macro = cams.find(d => /macro/i.test(d.label));
+      const back = cams.find(d => /back|rear|environment/i.test(d.label));
+      deviceId = (macro || back) ? (macro || back).deviceId : (cams[cams.length - 1] && cams[cams.length - 1].deviceId);
+    } catch (e) { /* ignore, fall back to facingMode */ }
+
+    // Once the stream is actually flowing, try to enable continuous autofocus and reveal the torch button if supported.
+    scannerVideo.addEventListener("loadedmetadata", enableCameraExtras, { once: true });
+
+    await zxingReader.decodeFromConstraints(
+      {
+        video: {
+          ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: "environment" }),
+        },
+      },
+      scannerVideo,
+      (result, err) => {
+        if (result) handleScanResult(result.getText());
+      }
+    );
   } catch (e) {
-    console.log("Codice non trovato nella foto:", e);
-    scannerStatus.textContent = "Codice non trovato. Tocca per riprovare.";
-    
-    // Permetti di riprovare
-    scannerPreview.style.display = "none";
-    scannerVideo.style.display = "block";
-    scannerShutter.style.display = "flex";
+    console.error(e);
+    showToast("Impossibile accedere alla fotocamera");
+    stopScanner();
   }
 }
 
-// Tocca la preview per riprovare
-scannerPreview.onclick = () => {
-  scannerPreview.style.display = "none";
-  scannerVideo.style.display = "block";
-  scannerShutter.style.display = "flex";
-  scannerStatus.textContent = "Avvicina il codice e scatta una foto";
-};
+function enableCameraExtras() {
+  const track = scannerVideo.srcObject && scannerVideo.srcObject.getVideoTracks()[0];
+  if (!track || !track.getCapabilities) return;
+  const caps = track.getCapabilities();
+  const advanced = {};
+  if (caps.focusMode && caps.focusMode.includes("continuous")) advanced.focusMode = "continuous";
+  if (Object.keys(advanced).length) {
+    track.applyConstraints({ advanced: [advanced] }).catch(() => {});
+  }
+  if (caps.torch) {
+    document.getElementById("scannerTorch").style.display = "flex";
+  }
+}
+
+// Tapping the video nudges the camera to re-attempt focus — helpful when continuous
+// autofocus gets "stuck" on some Android devices.
+scannerVideo.addEventListener("click", () => {
+  const track = scannerVideo.srcObject && scannerVideo.srcObject.getVideoTracks()[0];
+  if (!track || !track.getCapabilities) return;
+  const caps = track.getCapabilities();
+  if (!caps.focusMode) return;
+  if (caps.focusMode.includes("single-shot")) {
+    track.applyConstraints({ advanced: [{ focusMode: "single-shot" }] })
+      .then(() => {
+        setTimeout(() => {
+          if (caps.focusMode.includes("continuous")) {
+            track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
+          }
+        }, 600);
+      })
+      .catch(() => {});
+  }
+});
 
 function stopScanner() {
   scannerView.style.display = "none";
-  
-  if (scannerStream) {
-    scannerStream.getTracks().forEach(t => t.stop());
-    scannerStream = null;
+  torchOn = false;
+  document.getElementById("scannerTorch").style.display = "none";
+  scannerVideo.removeEventListener("loadedmetadata", enableCameraExtras);
+  if (zxingReader && zxingReader.reset) {
+    try { zxingReader.reset(); } catch (e) {}
   }
-  
-  scannerVideo.srcObject = null;
-  scannerPreview.src = "";
-  scannerPreview.style.display = "none";
-  scannerVideo.style.display = "block";
+  if (scannerVideo.srcObject) {
+    scannerVideo.srcObject.getTracks().forEach(t => t.stop());
+    scannerVideo.srcObject = null;
+  }
 }
 
 async function handleScanResult(code) {
+  scannerStatus.textContent = "Trovato: " + code;
   stopScanner();
   itemBarcode.value = code;
   if (!itemBackdrop.classList.contains("open")) {
@@ -574,7 +606,40 @@ async function handleScanResult(code) {
     itemBarcode.value = code;
   }
   await lookupProduct(code);
-}let toastTimer = null;
+}
+
+async function lookupProduct(code) {
+  if (!navigator.onLine) {
+    productHint.style.display = "flex";
+    productHint.className = "product-hint warn";
+    productHint.textContent = "Sei offline: inserisci i dati del prodotto manualmente.";
+    return;
+  }
+  productHint.style.display = "flex";
+  productHint.className = "product-hint";
+  productHint.textContent = "Cerco il prodotto…";
+  try {
+    const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`);
+    const data = await res.json();
+    if (data && data.status === 1 && data.product) {
+      const p = data.product;
+      const name = p.product_name_it || p.product_name || "";
+      const brand = p.brands || "";
+      if (name) itemName.value = brand ? `${name}` : name;
+      productHint.textContent = `Trovato: ${name || "prodotto"}${brand ? " · " + brand : ""}`;
+      productHint.className = "product-hint";
+    } else {
+      productHint.textContent = "Prodotto non trovato: inserisci nome e categoria manualmente.";
+      productHint.className = "product-hint warn";
+    }
+  } catch (e) {
+    productHint.textContent = "Ricerca non riuscita: inserisci i dati manualmente.";
+    productHint.className = "product-hint warn";
+  }
+}
+
+/* ===================== Toast ===================== */
+let toastTimer = null;
 function showToast(msg) {
   const el = document.getElementById("toast");
   el.textContent = msg;
@@ -608,6 +673,11 @@ async function init() {
   await seedDefaultsIfEmpty();
   await loadAll();
   updateOnlineStatus();
+
+  if (sb && navigator.onLine) {
+    state.categories.forEach(syncCategoryRemote);
+    state.items.forEach(syncItemRemote);
+  }
 
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("service-worker.js").catch(() => {});
