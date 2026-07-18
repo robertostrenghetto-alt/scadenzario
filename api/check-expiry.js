@@ -25,10 +25,24 @@ module.exports = async function handler(req, res) {
     );
     if (!listResp.ok) {
       const t = await listResp.text();
-      res.status(502).json({ error: "Errore lettura Supabase", detail: t });
+      res.status(502).json({
+        error: "Errore lettura Supabase",
+        detail: t,
+        debug_url: SUPABASE_URL,
+        debug_key_len: SUPABASE_SERVICE_ROLE_KEY.length,
+      });
       return;
     }
     const items = await listResp.json();
+
+    // debug: conta anche senza filtri, per capire se il problema è il filtro o la connessione
+    const debugAll = await fetch(`${SUPABASE_URL}/rest/v1/scadenzario_items?select=id,name,expiry_date,notified_amber`, {
+      headers: {
+        apikey: SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      },
+    });
+    const debugAllItems = debugAll.ok ? await debugAll.json() : await debugAll.text();
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -68,9 +82,8 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    res.status(200).json({ checked: items.length, notified: notifiedIds.length });
+    res.status(200).json({ checked: items.length, notified: notifiedIds.length, debug_all_rows: debugAllItems });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
 };
-
