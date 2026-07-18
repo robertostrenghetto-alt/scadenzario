@@ -45,6 +45,46 @@ async function syncCategoryDeleteRemote(id) {
   try { await sb.from("scadenzario_categories").delete().eq("id", id); } catch (e) { /* best-effort */ }
 }
 
+// Scarica categorie/alimenti da Supabase e li unisce ai dati locali (usata all'avvio,
+// così un dispositivo nuovo o con dati vuoti riceve quello che è già stato salvato altrove,
+// invece di ripartire da zero e creare doppioni).
+async function pullRemoteMerge() {
+  if (!sb || !navigator.onLine) return;
+  try {
+    const { data: remoteCats, error: e1 } = await sb.from("scadenzario_categories").select("*");
+    if (!e1 && remoteCats) {
+      for (const rc of remoteCats) {
+        const local = await getOne("categories", rc.id);
+        if (!local) {
+          await put("categories", { id: rc.id, name: rc.name, order: rc.order });
+        }
+      }
+    }
+    const { data: remoteItems, error: e2 } = await sb.from("scadenzario_items").select("*");
+    if (!e2 && remoteItems) {
+      for (const ri of remoteItems) {
+        const local = await getOne("items", ri.id);
+        const remoteUpdated = ri.updated_at || 0;
+        const localUpdated = local ? (local.updatedAt || 0) : -1;
+        if (!local || remoteUpdated > localUpdated) {
+          await put("items", {
+            id: ri.id,
+            name: ri.name,
+            categoryId: ri.category_id,
+            quantity: ri.quantity || "",
+            dateType: ri.date_type || "entro",
+            expiryDate: ri.expiry_date,
+            notes: ri.notes || "",
+            barcode: ri.barcode || null,
+            addedAt: ri.added_at || Date.now(),
+            updatedAt: ri.updated_at || Date.now(),
+          });
+        }
+      }
+    }
+  } catch (e) { /* best-effort */ }
+}
+
 /* ===================== DB layer ===================== */
 const DB_NAME = "scadenzarioDB";
 const DB_VERSION = 1;
@@ -92,6 +132,10 @@ async function put(storeName, obj) {
 async function del(storeName, id) {
   const store = await tx(storeName, "readwrite");
   return reqToPromise(store.delete(id));
+}
+async function getOne(storeName, id) {
+  const store = await tx(storeName, "readonly");
+  return reqToPromise(store.get(id));
 }
 
 function uid() {
@@ -670,6 +714,9 @@ async function loadAll() {
 }
 
 async function init() {
+  if (sb && navigator.onLine) {
+    await pullRemoteMerge();
+  }
   await seedDefaultsIfEmpty();
   await loadAll();
   updateOnlineStatus();
