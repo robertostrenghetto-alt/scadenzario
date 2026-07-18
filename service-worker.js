@@ -6,6 +6,7 @@ const APP_SHELL = [
   "./app.js",
   "./manifest.json",
   "./assets/zxing.min.js",
+  "./assets/supabase.min.js",
   "./assets/fonts/fraunces-latin-500-normal.woff2",
   "./assets/fonts/fraunces-latin-600-normal.woff2",
   "./assets/fonts/fraunces-latin-700-normal.woff2",
