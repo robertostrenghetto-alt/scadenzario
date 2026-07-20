@@ -1,6 +1,9 @@
 "use strict";
 
 /* ===================== Supabase sync (for Telegram alerts) ===================== */
+// Incolla qui l'URL e la chiave "anon public" del progetto ovwauqqwwsoyilsshzta
+// (Supabase → Settings → API). Finché restano ai valori di default, la sincronizzazione
+// resta disattivata e l'app funziona esattamente come prima, solo in locale.
 const SUPABASE_URL = "https://ovwauqqwwsoyilsshzta.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im92d2F1cXF3d3NveWlsc3NoenRhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM2OTk0MDQsImV4cCI6MjA4OTI3NTQwNH0.JbP-1n2pwtSI5LIV7LLAUfhpGUFG3pEsI2AFVcuuslg";
 
@@ -21,7 +24,8 @@ function toRemoteItem(item) {
     barcode: item.barcode || null,
     added_at: item.addedAt || null,
     updated_at: item.updatedAt || null,
-    notified_amber: false, 
+    notified_amber: false, // ogni modifica riarma l'allarme
+    deleted: false,
   };
 }
 
@@ -31,22 +35,23 @@ async function syncItemRemote(item) {
 }
 async function syncItemDeleteRemote(id) {
   if (!sb || !navigator.onLine) return;
-  try { await sb.from("scadenzario_items").delete().eq("id", id); } catch (e) { /* best-effort */ }
+  // Non cancelliamo la riga: la marchiamo come cancellata, così ogni dispositivo che la
+  // scarica sa di doverla rimuovere in locale invece di "resuscitarla" ripubblicandola.
+  try { await sb.from("scadenzario_items").update({ deleted: true, updated_at: Date.now() }).eq("id", id); } catch (e) { /* best-effort */ }
 }
-
 async function syncCategoryRemote(cat) {
   if (!sb || !navigator.onLine) return;
-  try { 
-    await sb.from("scadenzario_categories").upsert({ 
-      id: cat.id, 
-      name: cat.name, 
-      order: cat.order,
-      updated_at: cat.updatedAt || Date.now(),
-      is_deleted: cat.isDeleted || false
-    }); 
-  } catch (e) { /* best-effort */ }
+  try { await sb.from("scadenzario_categories").upsert({ id: cat.id, name: cat.name, order: cat.order, deleted: false }); } catch (e) { /* best-effort */ }
+}
+async function syncCategoryDeleteRemote(id) {
+  if (!sb || !navigator.onLine) return;
+  try { await sb.from("scadenzario_categories").update({ deleted: true }).eq("id", id); } catch (e) { /* best-effort */ }
 }
 
+// Scarica categorie/alimenti da Supabase e li unisce ai dati locali (usata all'avvio,
+// così un dispositivo nuovo o con dati vuoti riceve quello che è già stato salvato altrove,
+// invece di ripartire da zero e creare doppioni). Applica anche le cancellazioni: se una
+// categoria/alimento risulta cancellato altrove, viene rimosso anche qui.
 async function pullRemoteMerge() {
   if (!sb || !navigator.onLine) return;
   try {
@@ -54,17 +59,12 @@ async function pullRemoteMerge() {
     if (!e1 && remoteCats) {
       for (const rc of remoteCats) {
         const local = await getOne("categories", rc.id);
-        const remoteUpdated = rc.updated_at || 0;
-        const localUpdated = local ? (local.updatedAt || 0) : -1;
-        
-        if (!local || remoteUpdated > localUpdated) {
-          await put("categories", { 
-            id: rc.id, 
-            name: rc.name, 
-            order: rc.order,
-            updatedAt: remoteUpdated,
-            isDeleted: rc.is_deleted || false
-          });
+        if (rc.deleted) {
+          if (local) await del("categories", rc.id);
+          continue;
+        }
+        if (!local) {
+          await put("categories", { id: rc.id, name: rc.name, order: rc.order });
         }
       }
     }
@@ -72,6 +72,10 @@ async function pullRemoteMerge() {
     if (!e2 && remoteItems) {
       for (const ri of remoteItems) {
         const local = await getOne("items", ri.id);
+        if (ri.deleted) {
+          if (local) await del("items", ri.id);
+          continue;
+        }
         const remoteUpdated = ri.updated_at || 0;
         const localUpdated = local ? (local.updatedAt || 0) : -1;
         if (!local || remoteUpdated > localUpdated) {
@@ -155,13 +159,7 @@ async function seedDefaultsIfEmpty() {
   if (cats.length === 0) {
     const defaults = ["Frigo", "Freezer", "Dispensa"];
     for (let i = 0; i < defaults.length; i++) {
-      await put("categories", { 
-        id: uid(), 
-        name: defaults[i], 
-        order: i, 
-        updatedAt: Date.now(), 
-        isDeleted: false 
-      });
+      await put("categories", { id: uid(), name: defaults[i], order: i });
     }
   }
 }
@@ -233,13 +231,10 @@ function renderChips() {
   const allCount = state.items.length;
   chipRow.appendChild(makeChip("all", "Tutti", allCount, state.filterCategory === "all"));
 
-  state.categories
-    .filter(c => !c.isDeleted)
-    .sort((a, b) => a.order - b.order)
-    .forEach(cat => {
-      const count = state.items.filter(i => i.categoryId === cat.id).length;
-      chipRow.appendChild(makeChip(cat.id, cat.name, count, state.filterCategory === cat.id));
-    });
+  state.categories.sort((a, b) => a.order - b.order).forEach(cat => {
+    const count = state.items.filter(i => i.categoryId === cat.id).length;
+    chipRow.appendChild(makeChip(cat.id, cat.name, count, state.filterCategory === cat.id));
+  });
 
   const gear = document.createElement("button");
   gear.className = "chip add-chip";
@@ -361,18 +356,14 @@ const productHint = document.getElementById("productHint");
 
 let currentDateType = "entro";
 
-// MODIFICATA: Popola la select escludendo le categorie eliminate
 function populateCategorySelect() {
   itemCategory.innerHTML = "";
-  state.categories
-    .filter(c => !c.isDeleted)
-    .sort((a, b) => a.order - b.order)
-    .forEach(cat => {
-      const opt = document.createElement("option");
-      opt.value = cat.id;
-      opt.textContent = cat.name;
-      itemCategory.appendChild(opt);
-    });
+  state.categories.sort((a, b) => a.order - b.order).forEach(cat => {
+    const opt = document.createElement("option");
+    opt.value = cat.id;
+    opt.textContent = cat.name;
+    itemCategory.appendChild(opt);
+  });
 }
 
 function openItemSheet(id) {
@@ -396,7 +387,7 @@ function openItemSheet(id) {
     itemSheetTitle.textContent = "Nuovo alimento";
     itemId.value = "";
     itemName.value = "";
-    itemCategory.value = state.categories.filter(c => !c.isDeleted)[0] ? state.categories.filter(c => !c.isDeleted)[0].id : "";
+    itemCategory.value = state.categories[0] ? state.categories[0].id : "";
     itemQty.value = "";
     itemDate.value = "";
     itemNotes.value = "";
@@ -480,31 +471,26 @@ catBackdrop.addEventListener("click", (e) => {
   if (e.target === catBackdrop) catBackdrop.classList.remove("open");
 });
 
-// MODIFICATA: Mostra nel pannello solo categorie attive
 function renderCatList() {
   catList.innerHTML = "";
-  state.categories
-    .filter(c => !c.isDeleted)
-    .sort((a, b) => a.order - b.order)
-    .forEach(cat => {
-      const row = document.createElement("div");
-      row.className = "cat-edit-row";
-      const count = state.items.filter(i => i.categoryId === cat.id).length;
-      row.innerHTML = `
-        <input type="text" value="${escapeHtml(cat.name)}" data-id="${cat.id}">
-        <span style="font-size:12px; color:var(--ink-soft); flex-shrink:0;">${count}</span>
-        <button class="icon-btn" data-del="${cat.id}">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-        </button>`;
-      catList.appendChild(row);
-    });
+  state.categories.sort((a, b) => a.order - b.order).forEach(cat => {
+    const row = document.createElement("div");
+    row.className = "cat-edit-row";
+    const count = state.items.filter(i => i.categoryId === cat.id).length;
+    row.innerHTML = `
+      <input type="text" value="${escapeHtml(cat.name)}" data-id="${cat.id}">
+      <span style="font-size:12px; color:var(--ink-soft); flex-shrink:0;">${count}</span>
+      <button class="icon-btn" data-del="${cat.id}">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      </button>`;
+    catList.appendChild(row);
+  });
 
   catList.querySelectorAll("input").forEach(inp => {
     inp.addEventListener("change", async () => {
       const cat = state.categories.find(c => c.id === inp.dataset.id);
       if (cat && inp.value.trim()) {
         cat.name = inp.value.trim();
-        cat.updatedAt = Date.now();
         await put("categories", cat);
         syncCategoryRemote(cat);
         await loadAll();
@@ -512,8 +498,6 @@ function renderCatList() {
       }
     });
   });
-  
-  // MODIFICATO: Pulsante di eliminazione logica
   catList.querySelectorAll("[data-del]").forEach(btn => {
     btn.onclick = async () => {
       const id = btn.dataset.del;
@@ -521,19 +505,11 @@ function renderCatList() {
       if (count > 0 && !confirm(`${count} alimenti sono in questa categoria e diventeranno "Senza categoria". Continuare?`)) {
         return;
       }
-      
-      const cat = state.categories.find(c => c.id === id);
-      if (cat) {
-        cat.isDeleted = true;
-        cat.updatedAt = Date.now();
-        await put("categories", cat);
-        syncCategoryRemote(cat);
-      }
-      
+      await del("categories", id);
+      syncCategoryDeleteRemote(id);
       const affected = state.items.filter(i => i.categoryId === id);
       for (const it of affected) {
         it.categoryId = null;
-        it.updatedAt = Date.now();
         await put("items", it);
         syncItemRemote(it);
       }
@@ -548,13 +524,7 @@ document.getElementById("addCatBtn").onclick = async () => {
   const name = input.value.trim();
   if (!name) return;
   const maxOrder = state.categories.reduce((m, c) => Math.max(m, c.order), -1);
-  const newCat = { 
-    id: uid(), 
-    name, 
-    order: maxOrder + 1, 
-    updatedAt: Date.now(), 
-    isDeleted: false 
-  };
+  const newCat = { id: uid(), name, order: maxOrder + 1 };
   await put("categories", newCat);
   syncCategoryRemote(newCat);
   input.value = "";
@@ -612,8 +582,9 @@ async function startScanner() {
       const macro = cams.find(d => /macro/i.test(d.label));
       const back = cams.find(d => /back|rear|environment/i.test(d.label));
       deviceId = (macro || back) ? (macro || back).deviceId : (cams[cams.length - 1] && cams[cams.length - 1].deviceId);
-    } catch (e) { }
+    } catch (e) { /* ignore, fall back to facingMode */ }
 
+    // Once the stream is actually flowing, try to enable continuous autofocus and reveal the torch button if supported.
     scannerVideo.addEventListener("loadedmetadata", enableCameraExtras, { once: true });
 
     await zxingReader.decodeFromConstraints(
@@ -648,6 +619,8 @@ function enableCameraExtras() {
   }
 }
 
+// Tapping the video nudges the camera to re-attempt focus — helpful when continuous
+// autofocus gets "stuck" on some Android devices.
 scannerVideo.addEventListener("click", () => {
   const track = scannerVideo.srcObject && scannerVideo.srcObject.getVideoTracks()[0];
   if (!track || !track.getCapabilities) return;
@@ -712,12 +685,12 @@ async function lookupProduct(code) {
       productHint.textContent = `Trovato: ${name || "prodotto"}${brand ? " · " + brand : ""}`;
       productHint.className = "product-hint";
     } else {
-      document.getElementById("productHint").textContent = "Prodotto non trovato: inserisci nome e categoria manualmente.";
-      document.getElementById("productHint").className = "product-hint warn";
+      productHint.textContent = "Prodotto non trovato: inserisci nome e categoria manualmente.";
+      productHint.className = "product-hint warn";
     }
   } catch (e) {
-    document.getElementById("productHint").textContent = "Ricerca non riuscita: inserisci i dati manualmente.";
-    document.getElementById("productHint").className = "product-hint warn";
+    productHint.textContent = "Ricerca non riuscita: inserisci i dati manualmente.";
+    productHint.className = "product-hint warn";
   }
 }
 
